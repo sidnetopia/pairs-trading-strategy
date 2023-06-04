@@ -1,0 +1,35 @@
+That is, we want to find pairs of stocks whose ratio of prices diverges and converges in a consistent manner.
+
+There are two main ways we can go about trying to this.
+
+We can look directly for divergence / convergence effects in historical prices (assuming these effects will continue in the future)
+We can look for fundamental economic drivers of this kind of behaviour.
+
+However, our linear backtest feature doesn’t have enough signal in it to justify such an exercise.
+
+That would be like splitting our factor plots into 2,000 different buckets and picking the top one.
+
+We can combine features together and, to the extent that they are somewhat uncorrelated, this will help us isolate the signal in our pairs selection process.
+
+One feature that can help us discriminate between good pairs trading candidates is the log difference in market capitalisation. 
+
+Pairs with very close market cap differences (decile 1) don’t do a huge amount better than average.
+But the very biggest differences (decile 10) do quite poorly.
+So this feature would be useful to us in this example, if our shortlist of pairs (that we got from the top x% by historic risk-adjusted backtest returns) contained some pairs that sit down here in the top decile by market cap difference.
+
+That’s the benefit of feature stacking.
+
+Instead of picking arbitrarily from one feature, we can use features which are slightly uncorrelated to reduce our shortlist in a manner which maximizes expected value.
+
+We can do this with time series features too.
+
+A simple example is to look at the same feature over different lookbacks.
+
+In our example, we picked the top 2% by our risk-adjusted linear backtest feature over some lookback period. That yielded 20,000 pair candidates.
+
+But we ideally want to select pairs that have been relatively stable across a range of lookback periods. So we might choose to select only the pairs that appeared in the top 5% over 1, 2, 3 and 5 year lookbacks, for example.
+
+Another example of feature stacking with time-series features would be to introduce entirely new time series features such as:
+
+counting the number of times the spread crossed its moving average
+summing the distance between normalised prices.

@@ -1,0 +1,10 @@
+Euclidean Distance
+
+normalise prices to 1 for each stock on the first day of the calendar month (by dividing each price by the price at the first day of the month)
+sum the squared differences between the prices.
+
+Zero Crossing Counts
+
+In this measure, we are simply counting the number of times in a month the spread crosses the mean after diverging to at least 2 standard deviations.
+
+It is a simple and direct measurement of the kind of time series behaviour we want in a prospective pair.

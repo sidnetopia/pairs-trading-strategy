@@ -1,0 +1,8 @@
+The possibility that outliers dominated the factor plots
+The inclusion of illiquid stocks in our universe, which we know tend to look better in pairs backtests
+Other limitations of using mean returns, such as an inability to control for volatility (which is important given our linear strategy)
+Small sample size – only a handful of out of sample years were available
+
+Remove outliers
+Filter on pairs where at least one stock is illiquid
+Look at risk-adjusted returns as well as mean returns

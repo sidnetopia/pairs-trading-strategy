@@ -1,0 +1,123 @@
+Dataset with features as follows:
+
+lsr_20 – Percentile rank of the average monthly dollar returns from the linear trading strategy on a 20 day lookback
+lsr_ra_20 – Percentile rank of the risk adjusted returns from the linear trading strategy on a 20 day lookback
+ed_1m – Percentile rank of (monthly-reset) Euclidean distance feature
+zc_20_2 – Percentile rank of zero crossing count on a 20 day lookback (requiring spread to diverge by 2 standard deviations before it can be recounted)
+sameindustry – Stocks in the pair are in the same industry
+samesector – Stocks in the pair are in the same sector
+isLiquid – flag showing whether the mean price is greater than $5 and the mean daily volume is greater than 300,000
+
+And there are versions of the features for 1, 2, and 5 year lookbacks.
+
+The features indexed 2019-01-01 “lookback 1” include only data from 2018
+The features indexed 2019-01-01 “lookback 2” include data from 2017-2018
+The features indexed 2019-01-01 “lookback 5” include data from 2014-2018
+
+forwardreturns – the annual returns from trading that pair in that year
+forwardriskreturns – the risk adjusted returns from trading that pair in that year (sharpe ratio).\
+
+You’ll notice all the features are scaled between 1 and 100.
+
+If lsr_ra_20 for AAPL / MSFT is 100 in 2019-01-01, then that means that it was in the top 1% of pairs for that feature for that year.
+
+We saw the mean log returns of the lower percentiles tended to be negative, but the mean of the sharpe ratios were positive (only going negative at the extreme low percentiles.)
+
+ Sharpe Ratio could be positive if the returns were negative is if the volatility of the losers tended to be higher than the volatility of the winners.
+
+laggedfeatures %>%
+  filter(startofyear >= '2012-01-01', isLiquid == 1, featurelookback == 5) %>%
+  mutate(vol = forwardreturns / forwardriskreturns) %>%
+  group_by(startofyear) %>%
+  mutate(volpercentile = ntile(vol, 100)) %>%
+  group_by(volpercentile) %>%
+  summarise(meanreturn = mean(forwardreturns, na.rm = T)) %>% 
+  ggplot(aes(x = volpercentile, y = meanreturn)) + geom_line()
+
+
+Well that’s a clear effect!
+
+And it explains the effect we saw with mean returns and mean Sharpe Ratio.
+
+Now, of course, this showing coincident mean returns against coincident volatility.
+
+It makes sense that very volatile backtests are likely to be the worst, because we get bigger in our positions as the spread goes against us. Those that spend the most time biggest will be the worst pairs!
+
+What is more interesting to us is whether the relationship holds if we lag the volatility. Let’s look at that…
+
+
+laggedfeatures %>%
+  filter(startofyear >= '2012-01-01', isLiquid == 1, featurelookback == 5) %>%
+  mutate(vol = forwardreturns / forwardriskreturns) %>%
+  group_by(stock1, stock2) %>%
+  arrange(startofyear) %>%
+  mutate(laggedvol = lag(vol)) %>%
+  ungroup() %>%
+  group_by(startofyear) %>%
+  mutate(volpercentile = ntile(laggedvol, 100)) %>%
+  group_by(volpercentile) %>%
+  summarise(meanreturn = mean(forwardreturns, na.rm = T)) %>% 
+  ggplot(aes(x = volpercentile, y = meanreturn)) + geom_line()
+
+Is there information in just filtering on past backtest volatility that isn’t already included in the risk-adjusted measure? Or is this effect already explained by the risk adjusted return measure?
+
+laggedfeatures %>%
+  filter(startofyear >= '2012-01-01', isLiquid == 1, featurelookback == 1) %>%
+  mutate(vol = forwardreturns / forwardriskreturns) %>%
+  filter(lsr_ra_20_bucket == 100) %>%
+  group_by(stock1, stock2) %>%
+  arrange(startofyear) %>%
+  mutate(laggedvol = lag(vol)) %>%
+  group_by(startofyear) %>%
+  mutate(volpercentile = ntile(laggedvol, 100)) %>%
+  group_by(volpercentile) %>%
+  summarise(meanreturn = mean(forwardreturns, na.rm = T)) %>% 
+  ggplot(aes(x = volpercentile, y = meanreturn)) + geom_line()
+
+
+Euclidean Distance
+A percentile rank of 100 for the euclidean distance measure means that the stock price processes stayed close together, on average, during the calendar month.
+
+A percentile rank of 1 means that they drifted apart and stayed apart, on average.
+
+Let’s do the 100 bucket mean sharpe ratio factor plot for this this guy…
+laggedfeatures %>%
+  filter(startofyear >= '2012-01-01', isLiquid == 1) %>%
+  mutate(lookback = factor(featurelookback)) %>%
+  group_by(lookback, ed_1m_bucket) %>%
+  summarise(meansharpe = mean(forwardriskreturns, na.rm = T)) %>% 
+  ggplot(aes(x = ed_1m_bucket, y = meansharpe, color=lookback)) + geom_line()
+
+
+Does the Euclidean Distance Feature Add Value to the Linear Backtest Feature?
+
+This feature is a bit noisier than the linear backtest returns, but it still looks very good.
+
+It will be a useful addition to our pairs selection model if it has the ability to further discriminate between the stuff we selected based on the linear backtest sharpe ratio feature.
+
+Let’s look at the top percentile by linear backtest sharpe ratio, and do a factor plot for the Euclidean Distance feature. If this feature has the ability to add value over-and-above the linear backtest feature, then we should see the higher percentiles outperforming, even when we’ve selected the creme de la creme from the linear backtest feature.
+laggedfeatures %>%
+  filter(startofyear >= '2012-01-01', isLiquid == 1, lsr_ra_20_bucket == 100, featurelookback == 5) %>%
+  mutate(lookback = factor(featurelookback)) %>%
+  group_by(lookback, ed_1m_bucket) %>%
+  summarise(meansharpe = mean(forwardriskreturns, na.rm = T)) %>% 
+  ggplot(aes(x = ed_1m_bucket, y = meansharpe)) + geom_line()
+
+
+laggedfeatures %>%
+  filter(isLiquid == 1, lsr_ra_20_bucket == 100, featurelookback == 5) %>%
+  mutate(lookback = factor(featurelookback)) %>%
+  group_by(startofyear, lookback, ed_1m_bucket) %>%
+  summarise(meansharpe = mean(forwardriskreturns, na.rm = T)) %>% 
+  ggplot(aes(x = ed_1m_bucket, y = meansharpe)) + geom_line() + facet_wrap(~startofyear)
+
+
+The “mountain” effect at the lower percentiles appears to be concentrated in a few years – where volatile mean-reversion was well rewarded.
+
+It certainly appears that combining the linear backtest and euclidean distance features together at different lookbacks would be valuable.
+
+Zero-Crossings Assignment
+The zero-crossing percentiles are zc_20_2_bucket.
+
+Can you repeat this analysis on the zero crossings feature. Discuss what you think on #4-graphical-models on Slack.
+

@@ -1,0 +1,336 @@
+Clustering Validation
+Load data and libraries
+Set your path variable and load data and libraries:
+
+DATA_FOLDER <- 'D:/ResilioSync/MLBootcamp/Code'
+required.packages <- c('tidyverse', 'tidyquant', 'ggplot2', 'dbscan', 'Rtsne')
+new.packages <- required.packages[!(required.packages %in% installed.packages()[,'Package'])]
+if(length(new.packages)) install.packages(new.packages, repos='http://cran.us.r-project.org')
+library(tidyverse)
+library(tidyquant)
+library(ggplot2)
+library(dbscan)
+library(Rtsne)
+load(paste0(DATA_FOLDER, '/unsupervised-learning/raw-data.RData'))
+load(paste0(DATA_FOLDER, '/unsupervised-learning/lsr-feature.RData'))
+load(paste0(DATA_FOLDER, '/unsupervised-learning/lsrlong-feature.RData'))
+     
+source(paste0(DATA_FOLDER, '/unsupervised-learning/clustering-utils.R'))
+Some useful functions
+We’ll use these later…
+
+create_return_subsets <- function(years, returns, is_length, oos_length=1, max_nans=50) {
+  # create return subsets suitable for PCA (ie missing data filled with mean)
+  return_subsets <- list()
+  for(i in c(1:(length(years)-(is_length+oos_length)))) {
+    is_start <- years[i]
+    is_end <- years[i+is_length]
+    return_subsets <- c(return_subsets, list(subset_returns(is_start, is_end, returns, max_nans=max_nans, fill_mean=TRUE)))
+  }
+  
+  return(return_subsets)
+}
+pairwise_tsne_distance <- function(tsne_coords) {
+  # Distance between points in t-SNE space
+  tsne_dist <- as.matrix(dist(tsne_coords))
+  tsne_dist <- tsne_dist %>% 
+    tbl_df() %>%
+    mutate(stock1 = rownames(tsne_dist)) %>%
+    pivot_longer(-stock1, names_to = "stock2", values_to = "distance") %>%
+    filter(stock1 != stock2)
+  
+  return(tsne_dist)
+}
+tsne_distance_factor_plot <- function(pairwise_tsne_dist, lsr_feature_df, start_date, end_date, use_sharpe=FALSE) {
+# Factor plot of tsne distance 
+# Use mean returns by default, or set use_sharpes = TRUE to plot mean sharpe of traded pairs
+  tsne_dist_perf <- lsr_feature_df %>%
+    filter(startofyear >= as.Date(start_date) & startofyear < as.Date(end_date)) %>%
+    select(stock1, stock2, startofyear, lb20mean, lb20stddev) %>%
+    left_join(pairwise_tsne_dist, by=c("stock1"="stock1", "stock2" = "stock2"))
+  
+  if(use_sharpe == TRUE) {
+    factor_plot <- tsne_dist_perf %>%
+      mutate(quantile = ntile(distance, 20)) %>%
+      group_by(quantile) %>%
+      mutate(sharpe20 = sqrt(12)*lb20mean/lb20stddev) %>%
+      summarise(mean_sharpe20 = mean(sharpe20, na.rm=T)) %>%
+      na.omit() %>%
+      ggplot(aes(x=quantile, y=mean_sharpe20)) +
+      geom_col() +
+      labs(y='Mean sharpe ratio of trade pairs',
+           title=paste0("t-SNE factor plot of mean sharpes", start_date, "-", end_date)
+           )
+  } else {
+    factor_plot <- tsne_dist_perf %>%
+      mutate(quantile = ntile(distance, 20)) %>%
+      group_by(quantile) %>%
+      summarise(mean_ret20 = mean(lb20mean)*1200) %>%
+      na.omit() %>%
+      ggplot(aes(x=quantile, y=mean_ret20)) +
+      geom_col() +
+      labs(y = 'Mean annualised return of trade pairs',
+           title = paste0("t-SNE factor plot ", start_date, "-", end_date)
+           )
+  }
+  
+  return(factor_plot)
+}
+cluster_on_insample <- function(return_subset, pca_rank=50, use_fundamentals=FALSE, eps_range=seq(4,14,0.1)) {
+# Cluster using DBSCAN on PCA loadings from returns_subset
+# Returns list of clusters and tsne coordinates 
+  pca <- prcomp(scale(return_subset), rank.=pca_rank)
+  
+  # add fundamental data
+  if(use_fundamentals) {
+    fundamentals <- hist_fund_df %>% 
+      mutate(date = date+1, marketcap = log(marketcap), pcratio = puts/calls) %>%
+      filter(date == as.Date(is_end)) %>%
+      select(ticker, marketcap, pe, de) 
+    #select(ticker, marketcap, pe, pb, de, roa, pcratio)
+    #fundamentals[is.na(fundamentals$pcratio), "pcratio"] <- 0
+    #fundamentals[fundamentals$pcratio == Inf, "pcratio"] <- 0
+    
+    loadings <- pca$rotation %>%
+      as.tibble(rownames = "ticker") %>% 
+      inner_join(fundamentals, by="ticker") %>%
+      na.omit()
+    
+    scaled_pca_factor_df <- loadings %>%
+      select(-ticker) %>%
+      scale(center = T, scale = T) %>%
+      as.matrix()
+    
+    rownames(scaled_pca_factor_df) <- loadings %>% pull(ticker)
+  } else {
+    scaled_pca_factor_df <- scale(pca$rotation, center=TRUE, scale=TRUE)
+  }
+  
+  db_pca <- tune_eps_auto(scaled_pca_factor_df, eps_range, min_pts=2)
+  
+  # Plot using t_SNE
+  tsne_pca <- Rtsne(na.omit(scaled_pca_factor_df), dims = 2, perplexity=30, 
+                    verbose=TRUE, max_iter = 1000, normalize=FALSE, pca=FALSE)
+  print(plot_tsne_dbscan_clusters(tsne_pca, db_pca, paste0("t-SNE from PCA subset eps=", db_pca$eps)))
+  
+  # Co-ordinates in t-SNE space
+  tsne_coords <- tsne_pca$Y
+  rownames(tsne_coords) <- colnames(return_subset)
+  
+  # create cluster dataframe
+  cl <- as.data.frame(cbind(rownames(scaled_pca_factor_df), as.numeric(db_pca$cluster)), stringsAsFactors=FALSE)
+  colnames(cl) <- c('ticker', 'cluster')
+  
+  return(list("clusters"=cl, "tsne_coords"=tsne_coords))
+}
+calc_perf <- function(lsr_subset, start_year, end_year) {
+# calculates performance of traded pairs from a subset of lsr dataframe
+  perf <- lsr_subset %>%
+    filter(startofyear >= as.Date(start_year),
+           startofyear < as.Date(end_year),
+           !is.na(lb20stddev),
+           liquid==TRUE
+           #lb20stddev < 0.5
+          ) %>%
+    group_by(startofyear) %>%
+    mutate(sharpe20 = sqrt(12)*lb20mean/lb20stddev) %>%
+    group_by(startofyear) %>%
+    summarise(mean_annret = mean(lb20mean)*1200,
+              mean_annshrp = mean(sharpe20, na.rm=T), 
+              count=n()
+              )
+  
+  return(perf)
+}
+Set important parameters
+These are used throughout the analysis
+
+### Important parameters
+years <- c(as.character(sort(unique(lsrlong_df$startofyear))), "2020-01-01")
+is_length <- 3
+oos_length <- 1
+pca_rank <- 50
+eps_range <- seq(1,10,0.2)
+Make return subsets
+Create a list of return subsets corresponding to each in-sample period. Takes a few minutes to run.
+
+return_subsets <- create_return_subsets(years, ret, 
+                                        is_length, oos_length, 
+                                        max_nans=50)
+Make clusters
+On each return subset, extract a set of clusters and t-SNE coordinates for each stock. Sanity check by observing the t-SNE plot for each subset.
+
+cluster_subsets <- list()
+tsne_coords_subsets <- list()
+for(return_subset in return_subsets) {
+  clusters <- cluster_on_insample(return_subset, 
+                                  pca_rank=pca_rank, 
+                                  use_fundamentals=FALSE, 
+                                  eps_range=eps_range
+                                  )
+  
+  cluster_subsets <- c(cluster_subsets, 
+                       list(clusters[["clusters"]])
+                       )
+  
+  tsne_coords_subsets <- c(tsne_coords_subsets,
+                           list(clusters[["tsne_coords"]])
+                           )
+}
+
+
+
+
+Conclusions
+The key take-aways from this analysis are:
+
+In 11 of 17 out-of-sample periods, proximity in t-SNE space was a helpful discriminator of future profitable and unprofitable pairs. In 2 of 17 periods it neither helped nor hindered and in 4 of 17 it predicted the opposite of what we hoped, on average.
+Intra-cluster pairs performed only marginally, if at all, better than non-clustered pairs.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Validate t-SNE
+Make factor plots of t-SNE distance for each out-of-sample period, dropping illiquid stocks and outliers.
+
+In this case, the desired shape of our factor plots would be the lower quantiles (representing stocks closest in t-SNE space) having the highest forward returns, and higher quantiles (representing stocks furthest apart in t-SNE space) having the lowest forward returns.
+
+If you would like to make a factor plot of mean pair sharpes, consider not dropping mean return outliers, as the sharpe ratio should account for these by considering volatility.
+
+### Validate t-SNE
+for(subset_num in c(1:length(tsne_coords_subsets))) {
+  tsne_coords <- tsne_coords_subsets[[subset_num]]
+  tsne_dist <- pairwise_tsne_distance(tsne_coords)
+  
+  # filter on liquidity flag and outlier in oos year
+  # if plotting sharpe ratio consider not dropping outliers
+  liquid_outlier_pairs <- lsrlong_df %>%
+    filter(startofyear == as.Date(years[(subset_num+is_length)]),
+           liquid == TRUE,
+           abs(lb20mean) < 50
+           )
+  tsne_dist <- tsne_dist %>%
+    inner_join(liquid_outlier_pairs, 
+               by=c('stock1'='stock1', 'stock2'='stock2')
+    ) %>%
+    select(stock1, stock2, distance)
+  
+  # factor plot on out of sample period - set use_sharpe=TRUE for a factor plot of mean sharpe of traded pairs
+  start_year <- years[subset_num+is_length]
+  end_year <- years[subset_num+is_length+oos_length]
+  print(tsne_distance_factor_plot(tsne_dist, lsrlong_df, start_year, end_year, use_sharpe=FALSE))
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+What do you make of these results?
+
+I’d consider 11 of the 17 factor plots to be close to what we’re hoping to see (2004-2007, 2010, 2012-2015, 2017-2018), albeit some of those look more consistent than others - in particular 2010 looks fairly borderline.
+
+At least 2 look random enough to suggest that t-SNE distance didn’t discriminate at all in those periods (2003, 2008).
+
+The remaining 4 suggest t-SNE got it wrong in those periods (2009, 2011, 2016, 2019).
+
+So out of 17 out-of-sample periods, t-SNE distance as a factor added value in 11 periods. In 2 periods it neither helped nor hindered, and in 4 periods it got it wrong.
+
+Validate clusters
+Next we perform a similar procedure using the actual clusters identified.
+
+Specifically, for each period in our analysis, we compare the performance of all possible intra-cluster pairs to all the pairs made from stocks that didn’t make it into a cluster.
+
+This takes quite a while to run as it gathers all the possible intra-cluster pairs from each out-of-sample period. And since we’re now considering clusters consisting of as few as two stocks, we might have over 100 clusters in a single period.
+
+Plot performance spread
+Having gathered all the intra-cluster and wider-universe pairs for each subset of data, we can now plot the difference in aggregated performance between the two groups.
+
+In the plots below, when the line is above zero, the intra-cluster pairs out-performed.
+
+We can plot a spread of mean annual returs and mean sharpe ratio between the two groups:
+
+perf <- traded_pairs_perf %>%
+  bind_rows() %>%
+  #select(-count) %>%
+  left_join(
+    (wider_universe_perf %>%
+       bind_rows()),
+    by='startofyear',
+    suffix=c('_traded', '_untraded')
+  ) %>%
+  group_by(startofyear) %>%
+  summarise(
+    mean_annret_traded = weighted.mean(mean_annret_traded, count_traded),
+    mean_annret_untraded = weighted.mean(mean_annret_untraded, count_untraded),
+    mean_annshrp_traded = weighted.mean(mean_annshrp_traded, count_traded),
+    mean_annshrp_untraded = weighted.mean(mean_annshrp_untraded, count_untraded)
+  )
+perf %>%
+  mutate(spread = mean_annret_traded - mean_annret_untraded) %>%
+  ggplot(aes(x=startofyear, y=spread)) +
+  geom_line() +
+  labs(title=paste0('Spread of mean returns with pca rank ', pca_rank, ' IS length ', is_length))
+
+
+perf %>%
+  mutate(spread = mean_annshrp_traded - mean_annshrp_untraded) %>%
+  ggplot(aes(x=startofyear, y=spread)) +
+  geom_line() +
+  labs(title=paste0('Spread of mean sharpe with pca rank ', pca_rank, ' IS length ', is_length))
+
+
+Marginal, if any, benefit from trading clustered pairs vs unclustered.

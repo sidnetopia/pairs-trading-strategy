@@ -1,0 +1,236 @@
+Linear Strategy Backtest Returns
+
+We will scale our percentiles into deciles, as before, and plot a decile factor plot of mean backtest performance (forwardreturns) as a function of past backtest performance (lsr_20).
+
+
+In this analysis we are using all of the rolling periods we can. Here’s a picture of how we are using the data,
+
+Factor Analysis on Mean Returns and Mean Sharpe Ratio
+
+laggedfeatures %>%
+  filter(startofyear >= '2012-01-01') %>%
+  mutate(decile = ceiling(lsr_20_bucket / 10)) %>% # convert percentiles to deciles
+  group_by(decile) %>%
+  summarise(meanreturn = mean(forwardreturns, na.rm = T)) %>% 
+  ggplot(aes(x = decile, y = meanreturn)) + geom_bar(stat='identity')
+
+  This relationship holds up on average across the whole sample set at 1, 2 and 5 year lookbacks.
+
+  laggedfeatures %>%
+  filter(startofyear >= '2012-01-01') %>%
+  mutate(lookback = factor(featurelookback)) %>%
+  mutate(decile = ceiling(lsr_20_bucket / 10)) %>% # convert percentiles to deciles
+  group_by(lookback, decile) %>%
+  summarise(meanreturn = mean(forwardreturns, na.rm = T)) %>% 
+  ggplot(aes(x = decile, y = meanreturn, fill=lookback)) + geom_bar(stat='identity', position='dodge')
+
+
+It appears that the longer lookback is moderately better at sorting the pairs most of the time. But we observe some extreme behaviour in the most extreme deciles.
+
+This is likely to be due to the fact that we are looking at returns, rather than risk adjusted returns. Big jumpy outliers will be hiding in those tails, and we are not penalising them for their excessive volatility.
+
+
+laggedfeatures %>%
+  filter(startofyear >= '2012-01-01') %>%
+  mutate(lookback = factor(featurelookback)) %>%
+  group_by(lookback, lsr_20_bucket) %>%
+  summarise(meanreturn = mean(forwardreturns, na.rm = T)) %>% 
+  ggplot(aes(x = lsr_20_bucket, y = meanreturn, color = lookback)) + geom_line()
+
+It is clear that some massive outliers are dominating the extreme end of things…
+We could remove those outliers explicitly from our analysis – but massive jumps are a feature of dealing with stocks.
+We’ll start with the decile plot. We’re going to use the lsr_ra_20 feature (which is our pairs sorted on mean annual sharpe ratio over the lookback period) and we’re going to plot the mean of forwardriskreturns (which is the annual sharpe ratio for the pair.)
+
+laggedfeatures %>%
+  filter(startofyear >= '2012-01-01') %>%
+  mutate(lookback = factor(featurelookback)) %>%
+  mutate(decile = ceiling(lsr_ra_20_bucket / 10)) %>% # convert percentiles to deciles
+  group_by(lookback, decile) %>%
+  summarise(meansharpe = mean(forwardriskreturns, na.rm = T)) %>% 
+  ggplot(aes(x = decile, y = meansharpe, color=lookback)) + geom_line()
+
+We observe some interesting things:
+
+We observe a very similar shape: the past risk-adjusted performance of a backtest is predictive of its future risk-adjusted performance
+The longer lookback looks to be considerably more effective for this universe for this time period.
+The mean of the Sharpe ratio is positive for everything
+
+laggedfeatures %>%
+  filter(startofyear >= '2012-01-01') %>%
+  mutate(lookback = factor(featurelookback)) %>%
+  group_by(lookback, lsr_ra_20_bucket) %>%
+  summarise(meansharpe = mean(forwardriskreturns, na.rm = T)) %>% 
+  ggplot(aes(x = lsr_ra_20_bucket, y = meansharpe, color=lookback)) + geom_line()
+
+Now we have penalised high volatility, our plot is much better behaved, and the longer lookback still outperforms in its ability to discriminate between good and bad pairs.
+
+Now let’s do a similar plot: we are still going to sort by risk adjusted performance, but we are going to plot the mean log returns (rather than Sharpe Ratio.)
+laggedfeatures %>%
+  filter(startofyear >= '2012-01-01') %>%
+  mutate(lookback = factor(featurelookback)) %>%
+  group_by(lookback, lsr_ra_20_bucket) %>%
+  summarise(meanreturns = mean(forwardreturns, na.rm = T)) %>% 
+  ggplot(aes(x = lsr_ra_20_bucket, y = meanreturns, color=lookback)) + geom_line()
+
+
+Well it’s always good to plot a distribution of returns to get some more insight.
+
+Let’s pull out the stuff in that top percentile for each lookback length, and plot the return distributions.
+laggedfeatures %>%
+  filter(startofyear >= '2012-01-01') %>%
+  mutate(lookback = factor(featurelookback)) %>%
+  filter(lsr_ra_20_bucket == 100) %>%
+  ggplot(aes(x = forwardreturns)) + geom_density() + facet_wrap(~lookback)
+
+
+For comparison let’s look at the percentile 1 – the very lowest one.
+laggedfeatures %>%
+  filter(startofyear >= '2012-01-01') %>%
+  mutate(lookback = factor(featurelookback)) %>%
+  filter(lsr_ra_20_bucket == 1) %>%
+  ggplot(aes(x = forwardreturns)) + geom_density() + facet_wrap(~lookback)
+
+
+So let’s look at the full distribution of mean returns (from 2012 onwards.)
+
+We don’t really expect to have that kind of lopsided skew in our returns, so let’s check for it, and worry if we see it in the full sample…
+laggedfeatures %>%
+  filter(startofyear >= '2012-01-01', featurelookback == 1) %>%
+  ggplot(aes(x = forwardreturns)) + geom_density()
+
+We do have some extreme records on each side. We can see this from the range over which the x axis extends.
+
+Let’s dig into some of the biggest values…
+laggedfeatures %>%
+  filter(startofyear >= '2012-01-01', featurelookback == 1) %>%
+  arrange(-abs(forwardreturns)) %>%
+  head(100)
+
+Thankfully, we have a flag in our dataframe called IsLiquid. This is set to 0 when the average stock price (unadjusted) in a year is under $5 or the average daily volume is less than 300k shares.
+
+Let’s plot the return distributions for the stuff we’ve flagged as illiquid vs the stuff we haven’t.
+laggedfeatures %>%
+  filter(startofyear >= '2012-01-01', featurelookback == 1) %>%
+  ggplot(aes(x = forwardreturns)) + geom_density() + facet_wrap(~isLiquid, scales = 'free')
+
+
+We’ll re-run our mean sharpe ratio percentile plot, excluding pair/year combinations flagged as illiquid.
+laggedfeatures %>%
+  filter(startofyear >= '2012-01-01', isLiquid == 1) %>%
+  mutate(lookback = factor(featurelookback)) %>%
+  group_by(lookback, lsr_ra_20_bucket) %>%
+  summarise(meansharpe = mean(forwardriskreturns, na.rm = T)) %>% 
+  ggplot(aes(x = lsr_ra_20_bucket, y = meansharpe, color=lookback)) + geom_line()
+
+
+Now we’ll do the same for mean returns.
+laggedfeatures %>%
+  filter(startofyear >= '2012-01-01', isLiquid == 1) %>%
+  mutate(lookback = factor(featurelookback)) %>%
+  group_by(lookback, lsr_ra_20_bucket) %>%
+  summarise(meanreturns = mean(forwardreturns, na.rm = T)) %>% 
+  ggplot(aes(x = lsr_ra_20_bucket, y = meanreturns, color=lookback)) + geom_line()
+
+
+Return Distribution Plots
+In these factor plots we were simply plotting the mean of the returns for each bucket.
+
+These kind of summary statistics can hide a lot of nuance, so let’s plot the return distributions for each bucket.
+
+It’s going to be hard to visualise 100 distributions at the same time, so let’s go back to dividing into deciles. We are going to plot a density plot for 10 deciles sorted by lsr_ra_20
+laggedfeatures %>%
+  filter(startofyear >= '2012-01-01', isLiquid == 1, featurelookback == 5) %>%
+  mutate(decile = factor(ceiling(lsr_ra_20_bucket / 10))) %>%
+  ggplot(aes(x = forwardreturns, color = factor(decile))) + geom_density()
+
+laggedfeatures %>%
+  filter(startofyear >= '2012-01-01', isLiquid == 1, featurelookback == 5) %>%
+  mutate(decile = factor(ceiling(lsr_ra_20_bucket / 10))) %>%
+  ggplot(aes(x = forwardreturns, color = factor(decile))) + geom_density() + xlim(-200, 200)
+
+We see a clear effect where higher deciles are progressively more positively skewed, with higher mean.
+
+laggedfeatures %>%
+  filter(startofyear >= '2012-01-01', isLiquid == 1, featurelookback == 5) %>%
+  filter(lsr_ra_20_bucket > 90) %>%
+  mutate(percentile = factor(lsr_ra_20_bucket)) %>%
+  ggplot(aes(x = forwardreturns, color = factor(percentile))) + geom_density() + xlim(-150, 150)
+
+
+Wow, that’s quite a result… Generally bucket 100 sits to the right of bucket 99, which sits to the right of bucket 98 etc…
+
+Look at the improved skew on the downside… and the position of the peak moving up and right..
+
+This is all looking very good.
+
+Now, let’s look at what’s in that top bucket 100 for lookback 5.
+
+First we’ll plot the return distributions in full for that combination…
+laggedfeatures %>%
+  filter(startofyear >= '2012-01-01', isLiquid == 1, featurelookback == 5, lsr_ra_20_bucket == 100) %>%
+  ggplot(aes(x = forwardreturns)) + geom_density()
+
+biggest ones by absolute returns…
+laggedfeatures %>%
+  filter(startofyear >= '2012-01-01', isLiquid == 1, featurelookback == 5, lsr_ra_20_bucket == 100) %>%
+  arrange(-abs(forwardreturns)) %>%
+  head(100)
+
+
+The top two are losing trades:
+
+APD / SCOR in 2019
+INFY / WW in 2015
+The two biggest winners are:
+
+NVO / SBS in 2013
+STMP / AX in 2019
+
+
+Feature Stacking with different Lookbacks
+So we have seen that this lsr_ra_20 backtest feature has some very nice properties.
+
+We saw that the top percentile tended to be the best performing
+We saw that the 5 year lookback tended to do better than the 1 and 2 year lookbacks
+
+l1 <- laggedfeatures %>% 
+  filter(startofyear >= '2012-01-01', isLiquid == 1, featurelookback == 1, lsr_ra_20_bucket == 100) 
+l2 <- laggedfeatures %>% filter(startofyear >= '2012-01-01', isLiquid == 1, featurelookback == 2, lsr_ra_20_bucket == 100)
+l5 <- laggedfeatures %>% filter(startofyear >= '2012-01-01', isLiquid == 1, featurelookback == 5, lsr_ra_20_bucket == 100)
+allreturns <- l1 %>% 
+  inner_join(l2, by = c('stock1', 'stock2', 'startofyear')) %>%
+  inner_join(l5, by = c('stock1', 'stock2', 'startofyear')) %>%
+  select(forwardreturns, forwardriskreturns) %>%
+  mutate(type = 'all')
+top5returns <- l5 %>%
+  select(forwardreturns, forwardriskreturns) %>%
+  mutate(type = 'l5')
+allreturns %>% 
+  bind_rows(top5returns) %>%
+  ggplot(aes(x = forwardreturns, color = type)) + geom_density() + xlim(-200, 200)
+
+
+We see a very consistent effect. Apart from 2017, which was a very low volatility year and difficult conditions for alpha trading.
+
+2009 would have been an excellent year to be trading this.
+
+We see a decay in the effect from the earlier years, which is what we would expect, given well-known alphas decay.
+
+
+Combining lsr_ra_20 with fundamental similarity
+Now let’s look at how well this feature combines with a fundamental similarity metric.
+
+We’re going to create a combined indicator from the industry and sector features which is:
+
+sameindustry – if both stocks are in the same industry and sector
+samesector – if both stocks are in the same sector, but different industires
+different – if they are in different sectors.
+
+laggedfeatures %>%
+  filter(startofyear >= '2012-01-01', isLiquid == 1, featurelookback == 5) %>%
+  mutate(industrysector = case_when(sameindustry == 1 ~ 'sameindustry',
+                                      sameindustry == 0 & samesector == 1 ~ 'samesector',
+                                      TRUE ~ 'different')) %>%
+  group_by(industrysector, lsr_ra_20_bucket) %>%
+  summarise(meansharpe = mean(forwardriskreturns, na.rm = T)) %>% 
+  ggplot(aes(x = lsr_ra_20_bucket, y = meansharpe, color=industrysector)) + geom_line()

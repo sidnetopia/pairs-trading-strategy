@@ -1,0 +1,528 @@
+required.packages <- c('tidyverse', 'tidyquant', 'glasso')
+new.packages <- required.packages[!(required.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages, repos='http://cran.us.r-project.org')
+library(tidyverse);library(tidyquant);library(glasso)
+
+# set your path variable appropriately, load helper functions and data
+setwd("D:/ResilioSync/MLBootcamp/Code/unsupervised-learning")
+source('./clustering-utils.R')
+load("./raw-data.RData")
+load("./lsrlong-feature.RData")
+set.seed(503)  # so that results are reproducible
+
+# Calculate returns
+ret <- prices_df %>%
+  group_by(ticker) %>%
+  tq_transmute(select=close, mutate_fun=periodReturn, period="daily")
+
+create_return_subsets <- function(years, returns, is_length, oos_length=1, max_nans=50) {
+  # create return subsets suitable for PCA (ie missing data filled with mean)
+  return_subsets <- list()
+  for(i in c(1:(length(years)-(is_length+oos_length)))) {
+    is_start <- years[i]
+    is_end <- years[i+is_length]
+    return_subsets <- c(return_subsets, list(subset_returns(is_start, is_end, returns, max_nans=max_nans, fill_mean=TRUE)))
+  }
+  
+  return(return_subsets)
+}
+
+save_inv_covs <- function(years, returns, is_length, oos_length=1, max_nans=50, rhos=c(0.3, 0.5, 0.7), savepath) {
+  # create and persist inverse covariance matrices for each return subset for each rho
+  
+  if(!dir.exists(file.path(savepath)))
+    dir.create(file.path(savepath))
+  
+  for(i in c(1:(length(years)-(is_length+oos_length)))) {
+    is_start <- years[i]
+    is_end <- years[i+is_length]
+    print(paste0("Doing ", is_start, " to ", is_end))
+    return_subset <- subset_returns(is_start, is_end, returns, max_nans=max_nans, fill_mean=FALSE)
+    S <- return_subset %>%
+      scale(center=TRUE, scale=TRUE) %>%
+      cov(use='p')
+    
+    for(rho in rhos) {
+      print(paste0("Doing rho = ", rho))
+      invcov <- glasso(S, rho=rho)  # takes (potentially much) longer to fit on full data set
+      P <- invcov$wi
+      colnames(P) <- colnames(S)
+      rownames(P) <- colnames(P)
+      saveRDS(P, file=paste0(savepath, is_start, "_", is_end, "_rho_", rho, ".rds"))
+    }
+  }
+}
+
+### Create historical subsets and inverse cov matrices
+years <- c(as.character(sort(unique(lsrlong_df$startofyear))), "2020-01-01")
+oos_length <- 1
+
+for(is_length in c(1:6)) {
+  invcov_filepath <- paste0("C:/Users/Kris/Documents/rw-ml-bootcamp/unsupervised-learning/invcovmats/", is_length,"yrIS/")
+  save_inv_covs(years, ret, is_length, oos_length, max_nans=50, rhos=c(0.1, 0.2, 0.3, 0.5, 0.7), savepath=invcov_filepath)
+}
+
+
+In this analysis, we used the inverse covariance matrices created with an in-sample length of three years and ρ=0.3,0.5.
+
+
+
+
+
+
+
+
+
+
+Graphical Lasso Validation
+Load data and libraries
+Set your path variable, load data and libraries and set is_length parameter:
+
+DATA_FOLDER <- '~/rw-ml-bootcamp' #"D:/ResilioSync/MLBootcamp/Code"
+setwd(paste0(DATA_FOLDER, '/unsupervised-learning'))
+required.packages <- c('tidyverse', 'glasso')
+new.packages <- required.packages[!(required.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages, repos='http://cran.us.r-project.org')
+library(tidyverse);library(glasso);
+source('./clustering-utils.R')
+load("./raw-data.RData")
+load("./lsrlong-feature.RData")
+invcov_filepath <- paste0(DATA_FOLDER, '/unsupervised-learning/invcovmats/')
+is_length <- 3
+We’ve created a bunch of inverse covariance matrices from overlapping 3-year periods. The code for doing that yourself is on the site, here we’re just going to load them and do the analysis.
+
+In particular, we want to explore the question Are stronger connections associated with pairs trading profitability?
+
+Let’s look at a few different values of rho:
+
+rho=0.3
+Extract out-of-sample performance
+This code loops through all the rho=0.3 inverse covariance matrices, extracts the partial correlation values for each pair, and then joins the subsequent year’s performance from lsrlong_df:
+
+years <- c(as.character(sort(unique(lsrlong_df$startofyear))), "2020-01-01")
+oos_length <- 1
+# get filenames of saved inverse covariance matrices
+rho = 0.3
+filenames <- list.files(path = invcov_filepath, pattern = paste0(rho,".rds"), full.names = TRUE)
+N <- length(filenames)
+oos_perfs <- list()
+for(i in seq(1, N, 1)) {
+  
+  # extract start/end dates from filenames
+  dates <- filenames[i] %>%
+    str_split("/", simplify=TRUE) %>%
+    last() %>%
+    str_split("_", simplify=TRUE) %>%
+    last() 
+  start_date <- dates[1]  %>%
+    as.Date()
+  end_date <- dates[2]  %>%
+    as.Date()
+  oos_end_date <- as.Date(end_date) %m+% years(oos_length)
+  
+  P <- readRDS(filenames[i])  
+  
+  # bucket by connection strength
+  conn <- abs(P) %>%   # note taking absolute values
+    tbl_df() %>%
+    mutate(stock1 = rownames(P)) %>%
+    pivot_longer(-stock1, names_to = "stock2", values_to = "par_corr") %>%
+    filter(stock1 != stock2)
+  # out-of-sample performance 
+  # NOTE: can get less than nrow(P)*nrow(P)*num_years because some pairs won't have a result for a given year
+  oos_perf <- conn %>%
+    inner_join((lsrlong_df %>%
+                 filter(startofyear >= end_date,
+                        startofyear < oos_end_date,
+                        liquid == TRUE,
+                        abs(lb20mean) < 0.75) %>%
+                 select(stock1, stock2, startofyear, lb20mean)),
+               by=c("stock1"="stock1", "stock2" = "stock2"))
+  
+  oos_perfs <- c(oos_perfs, list(oos_perf))
+}
+Out-of-sample factor plots by year
+We drop anything with a zero partial correlation (no relationship) and then create factor plots for the remaining pairs.
+
+We hope to see that most of the quantiles have a positive mean return. We also hope to see that increasing partial correlations are associated with higher future returs.
+
+for(oos_perf in oos_perfs) {
+  print(oos_perf %>%
+    filter(par_corr != 0) %>%
+    mutate(quantile = ntile(par_corr, 10)) %>%
+    group_by(quantile) %>%
+    summarise(mean_ret20 = mean(lb20mean, na.rm=T)*1200) %>%
+    ggplot(aes(x=quantile, y=mean_ret20)) +
+    geom_col() +
+    ggtitle(paste0("Out-of-sample factor plot, non-zero partial correlation ", rho, " ", unique(oos_perf$startofyear))))
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+This is a good result in that in nearly every year, all of the quantiles (representing pairs with a connection) had a positive mean return.
+
+However, we don’t see a clear monotonically increasing mean return with quantile. This might suggest that discriminating on the basis of zero/non-zero partial correlation has value, while discriminating on magnitude might not. At least for rho=0.3 anyway.
+
+Out-of-sample non-zero vs zero performance by year
+Next let’s look at the out-of-sample performance of pairs with zero and non-zero partial correlations:
+
+## oos non-zero vs zero performance by year
+model_perfs <- oos_perfs %>%
+  map(~mutate(., par_corr_grp = case_when(par_corr > 0 ~ 'non-zero',
+                                       par_corr == 0 ~'zero'))
+  ) %>%
+  map(~group_by(., par_corr_grp)) %>%
+  map_df(~summarise(., 
+                    mean_return = mean(lb20mean, na.rm=T)*1200,
+                    oos_year = unique(startofyear),
+                    count_of_pairs = n()))
+model_perfs %>% 
+  ggplot(aes(x=oos_year, y=mean_return)) +
+  geom_col(aes(fill=par_corr_grp), position = "dodge") +
+  labs(x="Out-of-sample year", y="Linear Strat (20) Annual Return",
+       title=paste("Non-zero vs zero partial correlations, rho=", rho))
+
+
+Interesting. We can see that non-zero partial correlation has been a useful determinant of future pairs trading performance. It has out-performed in all but four years of our sample and hasn’t underperformed since 2009.
+
+In recent years, discriminating on this basis has generated positive returns, while returns to the zero partial correlation pairs was negative in aggregate.
+
+Let’s also look at the count of pairs falling into each category per year:
+
+model_perfs %>%
+  print(n=10)
+par_corr_grp
+<chr>
+mean_return
+<dbl>
+oos_year
+<date>
+count_of_pairs
+<int>
+non-zero	6.4485800	2003-01-01	6757
+zero	8.2439944	2003-01-01	154837
+non-zero	11.4585236	2004-01-01	9497
+zero	9.6480283	2004-01-01	204034
+non-zero	9.5668244	2005-01-01	11652
+zero	3.7429684	2005-01-01	241464
+non-zero	12.2283827	2006-01-01	11629
+zero	4.1167779	2006-01-01	279837
+non-zero	5.9427011	2007-01-01	12427
+zero	2.5735851	2007-01-01	339114
+1-10 of 34 rows
+We have more pairs than we can possibly trade in the non-zero category, so we certainly have scope for more aggressive filtering. We’ll revisit this using higher values of rho shortly.
+
+Out-of-sample quantiles vs wider universe by year
+We want to see if any quantiles systematically out-perform through time.
+
+## oos quantiles vs wider universe by year
+# get performance of non-zero pairs by quantile by year
+quantile_perfs <- oos_perfs %>%
+  map(~filter(., par_corr != 0)) %>%
+  map(~mutate(., quantile = ntile(par_corr, 10))) %>%
+  map(~group_by(., quantile)) %>%
+  map_df(~summarise(., 
+                    mean_return = mean(lb20mean, na.rm=T)*1200,
+                    oos_year = unique(startofyear)))
+# plot of quantile peformance by year, compared with zero partial correlations
+to_plot <- quantile_perfs %>% 
+  bind_rows(model_perfs %>%
+              filter(par_corr_grp == 'zero') %>%
+              mutate(quantile=0) %>%
+              select(quantile, oos_year, mean_return)
+              )
+ggplot(data=to_plot %>%
+         filter(quantile!=0), aes(x=oos_year, y=mean_return, group=quantile)) +
+geom_line(aes(colour=as.factor(quantile))) +
+geom_line(data=to_plot %>%
+            filter(quantile == 0), colour='black', size=1.25) + 
+annotate('text', x=as.Date('2014-01-01'), y=30, label="Black line represents\nwider universe") +
+labs(x="Out-of-sample year", y="Linear Strat (20) Annual Return",
+       title=paste("Non-zero partial correlation quantile vs zeros, rho=", rho),
+     colour="Quantile")
+
+
+We don’t really see any particular quantile consistently outperforming. For another view on that, we can look at the upper and lower quantiles vs the pairs with zero partial correlation:
+
+# plot of selected quantiles peformance by year, compared with non-zeros
+quantile_perfs %>% 
+  filter(quantile %in% c(6:10)) %>% 
+  group_by(oos_year) %>%
+  summarise(mean_return = mean(mean_return, na.rm=T)) %>%
+  inner_join((model_perfs %>%
+                filter(par_corr_grp == 'zero')), 
+             by=c("oos_year"="oos_year"),
+             suffix=c("_selected", "_zeros")) %>%
+  select(oos_year, mean_return_selected, mean_return_zeros) %>%
+  pivot_longer(-oos_year, names_to = "sample", values_to = "mean20") %>%
+  ggplot(aes(x=as.Date(oos_year), y=mean20)) +
+  geom_col(aes(fill=sample), position = "dodge") +
+  labs(x="Out-of-sample year", y="Linear Strat (20) Annual Return",
+       title=paste("Upper quantiles of non-zero partial correlations vs zeros, rho=", rho))
+
+
+quantile_perfs %>% 
+  filter(quantile %in% c(1:5)) %>% 
+  group_by(oos_year) %>%
+  summarise(mean_return = mean(mean_return, na.rm=T)) %>%
+  inner_join((model_perfs %>%
+                filter(par_corr_grp == 'zero')), 
+             by=c("oos_year"="oos_year"),
+             suffix=c("_selected", "_zeros")) %>%
+  select(oos_year, mean_return_selected, mean_return_zeros) %>%
+  pivot_longer(-oos_year, names_to = "sample", values_to = "mean20") %>%
+  ggplot(aes(x=as.Date(oos_year), y=mean20)) +
+  geom_col(aes(fill=sample), position = "dodge") +
+  labs(x="Out-of-sample year", y="Linear Strat (20) Annual Return",
+       title=paste("Lower quantiles of non-zero partial correlations vs zeros, rho=", rho))
+
+
+Looks like a pretty noisy relationship.
+
+rho=0.5
+Extract out-of-sample performance
+years <- c(as.character(sort(unique(lsrlong_df$startofyear))), "2020-01-01")
+oos_length <- 1
+# get filenames of saved inverse covariance matrices
+rho = 0.5
+filenames <- list.files(path = invcov_filepath, pattern = paste0(rho,".rds"), full.names = TRUE)
+# 
+N <- length(filenames)
+oos_perfs <- list()
+for(i in seq(1, N, 1)) {
+  
+  # extract start/end dates from filenames
+  dates <- filenames[i] %>%
+    str_split("/", simplify=TRUE) %>%
+    last() %>%
+    str_split("_", simplify=TRUE) %>%
+    last() 
+  start_date <- dates[1]  %>%
+    as.Date()
+  end_date <- dates[2]  %>%
+    as.Date()
+  oos_end_date <- as.Date(end_date) %m+% years(oos_length)
+  
+  P <- readRDS(filenames[i])  
+  
+  # bucket by connection strength
+  conn <- abs(P) %>%   # note taking absolute values
+    tbl_df() %>%
+    mutate(stock1 = rownames(P)) %>%
+    pivot_longer(-stock1, names_to = "stock2", values_to = "par_corr") %>%
+    filter(stock1 != stock2)
+  # out-of-sample performance 
+  # NOTE: can get less than nrow(P)*nrow(P)*num_years because some pairs won't have a result for a given year
+  oos_perf <- conn %>%
+    inner_join((lsrlong_df %>%
+                 filter(startofyear >= end_date,
+                        startofyear < oos_end_date,
+                        liquid == TRUE,
+                        abs(lb20mean) < 0.75) %>%
+                 select(stock1, stock2, startofyear, lb20mean)),
+               by=c("stock1"="stock1", "stock2" = "stock2"))
+  
+  oos_perfs <- c(oos_perfs, list(oos_perf))
+}
+Out-of-sample factor plots by year
+We drop anything with a zero partial correlation (no relationship) and then create factor plots for the remaining pairs.
+
+We hope to see that most of the quantiles have a positive mean return. We also hope to see that increasing partial correlations are associated with higher future returs.
+
+for(oos_perf in oos_perfs) {
+  print(oos_perf %>%
+    filter(par_corr != 0) %>%
+    mutate(quantile = ntile(par_corr, 10)) %>%
+    group_by(quantile) %>%
+    summarise(mean_ret20 = mean(lb20mean, na.rm=T)) %>%
+    ggplot(aes(x=quantile, y=mean_ret20)) +
+    geom_col() +
+    ggtitle(paste0("Out-of-sample factor plot, non-zero partial correlation ", rho, " ", unique(oos_perf$startofyear))))
+}
+
+
+
+
+
+
+
+Conclusions
+The main take-aways from this analysis are:
+
+The graphical lasso network model is a reasonably good and consistent discriminator of future profitable pairs. Certainly it seems to do a better job than clustering on PCA.
+Pairs with non-zero partial correlation in one period were consistently profitable in the next.
+The magnitude of partial correlation itself wasn’t correlated with better out of sample performance. No quantile consistently out-performed – it seemed to be enough for the partial correlation to be non-zero.
+For ρ=3, pairs with non-zero partial correlation out-performed those with zero partial correlation in 13 of 17 years. This includes every year out of the last ten.
+The degree of outperformance – that is, the spread between pairs with non-zero and zero partial correlation – could best be described as “small but not insignificant”. Over the last decade, the average out-performance was around 5% per year.
+Interestingly, in recent years (6 of the last 7), pairs with zero partial correlation were associated with negative mean returns, on average. Pairs with non-zero partial correlations are yet to suffer a negative year in aggregate.
+For ρ=3, we still have thousands of pairs to choose from. There is yet scope to whittle down the universe considerably.
+For ρ=5, out-of-sample performance was arguably slightly worse on the whole.
+Your Mission
+Here are some things for you to experiment with:
+
+Look at other values of ρ for the 3-year in-sample period. So far we’ve looked at 0.3 and 0.5. Are results appreciably different at 0.1 or 0.2? What about 0.7?
+Look at other in-sample lengths (covariance matrices created from all these lookbacks are in Resilio – select a different is length by choosing the appropriate filepath). Do you find any reason to prefer shorter in-sample lengths to longer ones, or vice versa?
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+Similar result to rho=0.3 - mostly positive, no quantile out-performs consistenly.
+
+Out-of-sample non-zero vs zero performance by year
+Next let’s look at the out-of-sample performance of pairs with zero and non-zero partial correlations:
+
+## oos non-zero vs zero performance by year
+model_perfs <- oos_perfs %>%
+  map(~mutate(., par_corr_grp = case_when(par_corr > 0 ~ 'non-zero',
+                                       par_corr == 0 ~'zero'))
+  ) %>%
+  map(~group_by(., par_corr_grp)) %>%
+  map_df(~summarise(., 
+                    mean_return = mean(lb20mean, na.rm=T)*1200,
+                    oos_year = unique(startofyear),
+                    count_of_pairs = n()))
+model_perfs %>% 
+  ggplot(aes(x=oos_year, y=mean_return)) +
+  geom_col(aes(fill=par_corr_grp), position = "dodge") +
+  labs(x="Out-of-sample year", y="Linear Strat (20) Annual Return",
+       title=paste("Non-zero vs zero partial correlations, rho=", rho))
+
+
+Maybe a slightly worse result than rho=0.3.
+
+Let’s also look at the count of pairs falling into each category per year:
+
+model_perfs %>%
+  print(n=10)
+par_corr_grp
+<chr>
+mean_return
+<dbl>
+oos_year
+<date>
+count_of_pairs
+<int>
+non-zero	7.1613198	2003-01-01	1524
+zero	8.1785129	2003-01-01	160070
+non-zero	7.2603807	2004-01-01	3230
+zero	9.7664603	2004-01-01	210301
+non-zero	8.1824422	2005-01-01	3969
+zero	3.9446136	2005-01-01	249147
+non-zero	6.1816778	2006-01-01	2280
+zero	4.4266888	2006-01-01	289186
+non-zero	-1.7201850	2007-01-01	2497
+zero	2.7242525	2007-01-01	349044
+1-10 of 34 rows
+We have more pairs than we can possibly trade in the non-zero category, so we certainly have scope for more aggressive filtering.
+
+Out-of-sample quantiles vs wider universe by year
+## oos quantiles vs wider universe by year
+# get performance of non-zero pairs by quantile by year
+quantile_perfs <- oos_perfs %>%
+  map(~filter(., par_corr != 0)) %>%
+  map(~mutate(., quantile = ntile(par_corr, 10))) %>%
+  map(~group_by(., quantile)) %>%
+  map_df(~summarise(., 
+                    mean_return = mean(lb20mean, na.rm=T)*1200,
+                    oos_year = unique(startofyear)))
+# plot of quantile peformance by year, compared with zero partial correlations
+to_plot <- quantile_perfs %>% 
+  bind_rows(model_perfs %>%
+              filter(par_corr_grp == 'zero') %>%
+              mutate(quantile=0) %>%
+              select(quantile, oos_year, mean_return)
+              )
+ggplot(data=to_plot %>%
+         filter(quantile!=0), aes(x=oos_year, y=mean_return, group=quantile)) +
+geom_line(aes(colour=as.factor(quantile))) +
+geom_line(data=to_plot %>%
+            filter(quantile == 0), colour='black', size=1.25) + 
+annotate('text', x=as.Date('2014-01-01'), y=30, label="Black line represents\nwider universe") +
+labs(x="Out-of-sample year", y="Linear Strat (20) Annual Return",
+       title=paste("Non-zero partial correlation quantile vs zeros, rho=", rho),
+     colour="Quantile")
+
+
+We don’t really see any particular quantile consistently outperforming. For another view on that, we can look at the upper and lower quantiles vs the pairs with zero partial correlation:
+
+# plot of selected quantiles peformance by year, compared with non-zeros
+quantile_perfs %>% 
+  filter(quantile %in% c(6:10)) %>% 
+  group_by(oos_year) %>%
+  summarise(mean_return = mean(mean_return, na.rm=T)) %>%
+  inner_join((model_perfs %>%
+                filter(par_corr_grp == 'zero')), 
+             by=c("oos_year"="oos_year"),
+             suffix=c("_selected", "_zeros")) %>%
+  select(oos_year, mean_return_selected, mean_return_zeros) %>%
+  pivot_longer(-oos_year, names_to = "sample", values_to = "mean20") %>%
+  ggplot(aes(x=as.Date(oos_year), y=mean20)) +
+  geom_col(aes(fill=sample), position = "dodge") +
+  labs(x="Out-of-sample year", y="Linear Strat (20) Annual Return",
+       title=paste("Upper quantiles of non-zero partial correlations vs zeros, rho=", rho))
+
+
+quantile_perfs %>% 
+  filter(quantile %in% c(1:5)) %>% 
+  group_by(oos_year) %>%
+  summarise(mean_return = mean(mean_return, na.rm=T)) %>%
+  inner_join((model_perfs %>%
+                filter(par_corr_grp == 'zero')), 
+             by=c("oos_year"="oos_year"),
+             suffix=c("_selected", "_zeros")) %>%
+  select(oos_year, mean_return_selected, mean_return_zeros) %>%
+  pivot_longer(-oos_year, names_to = "sample", values_to = "mean20") %>%
+  ggplot(aes(x=as.Date(oos_year), y=mean20)) +
+  geom_col(aes(fill=sample), position = "dodge") +
+  labs(x="Out-of-sample year", y="Linear Strat (20) Annual Return",
+       title=paste("Lower quantiles of non-zero partial correlations vs zeros, rho=", rho))
